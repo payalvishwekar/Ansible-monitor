@@ -1,0 +1,64 @@
+---
+- name: Monitor AWS EC2 VMs & Send Email Alerts
+  hosts: monitored_vms
+  gather_facts: true
+  vars_files:
+    - ../secrets/email_secrets.yml   # vaulted file
+  tasks:
+    - name: Get CPU usage %
+      shell: |
+        top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}'
+      register: cpu_raw
+      changed_when: false
+
+    - name: Set CPU fact
+      set_fact:
+        cpu_usage: "{{ cpu_raw.stdout | trim | float }}"
+
+    - name: Get Memory usage %
+      shell: free | awk '/Mem:/ {printf "%.0f", ($3/$2)*100}'
+      register: mem_raw
+      changed_when: false
+
+    - name: Set Memory fact
+      set_fact:
+        memory_usage: "{{ mem_raw.stdout | float }}"
+
+    - name: Get Disk usage % on root
+      shell: df / | tail -1 | awk '{print $5}' | tr -d '%'
+      register: disk_raw
+      changed_when: false
+
+    - name: Set Disk fact
+      set_fact:
+        disk_usage: "{{ disk_raw.stdout | float }}"
+
+    - name: Decide if alert is required
+      set_fact:
+        send_alert: >-
+          {{ (cpu_usage | float) > (cpu_threshold | float) or
+             (memory_usage | float) > (memory_threshold | float) or
+             (disk_usage | float) > (disk_threshold | float) }}
+
+    - name: Send Email Alert (if threshold breached)
+      mail:
+        host: "{{ smtp_host }}"
+        port: "{{ smtp_port }}"
+        username: "{{ smtp_user }}"
+        password: "{{ smtp_password }}"
+        from: "Ansible Monitor <{{ smtp_user }}>"
+        to: "{{ alert_email }}"
+        subject: "🚨 CRITICAL ALERT - {{ inventory_hostname }} Resource Threshold Breached"
+        body: |
+          Hello Team,
+
+          VM {{ inventory_hostname }} has exceeded thresholds:
+
+          • CPU Usage    : {{ cpu_usage }}%  (Threshold: {{ cpu_threshold }}%)
+          • Memory Usage : {{ memory_usage }}%  (Threshold: {{ memory_threshold }}%)
+          • Disk Usage   : {{ disk_usage }}%  (Threshold: {{ disk_threshold }}%)
+
+          Please investigate immediately.
+
+          Ansible Monitoring System
+      when: send_alert | bool
